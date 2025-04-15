@@ -1,0 +1,91 @@
+name: Build and Push RagFlow Docker Images
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  # 允许手动触发工作流
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install uv
+      run: |
+        pip install uv
+        
+    - name: Download dependencies
+      run: |
+        uv run download_deps.py
+        
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+      
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        
+    # 第一步：构建依赖镜像并推送
+    - name: Build dependencies image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile.deps
+        push: true
+        tags: |
+          infiniflow/ragflow_deps:latest
+        # 添加缓存以提高后续构建速度  
+        cache-from: type=registry,ref=infiniflow/ragflow_deps:buildcache
+        cache-to: type=registry,ref=infiniflow/ragflow_deps:buildcache,mode=max
+          
+    # 第二步：确保 Docker Hub 中的镜像已经可用
+    - name: Wait for image to be available
+      run: |
+        echo "Waiting for image to be available in registry..."
+        sleep 30
+        docker pull infiniflow/ragflow_deps:latest
+
+    # 第三步：构建主应用镜像（依赖上一步的镜像）
+    - name: Build RagFlow slim image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        build-args: |
+          LIGHTEN=1
+        tags: |
+          infiniflow/ragflow:nightly-slim
+        cache-from: type=registry,ref=infiniflow/ragflow:buildcache
+        cache-to: type=registry,ref=infiniflow/ragflow:buildcache,mode=max
+          
+    # 可选：推送到私有仓库  
+    - name: Login to private registry
+      uses: docker/login-action@v2
+      with:
+        registry: registry.cn-beijing.aliyuncs.com
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+        
+    - name: Tag and push to private registry
+      if: success()
+      run: 
+        docker pull infiniflow/ragflow:nightly-slim
+        docker tag infiniflow/ragflow:nightly-slim registry.cn-beijing.aliyuncs.com/why_namespace/images:latest
+        docker push registry.cn-beijing.aliyuncs.com/why_namespace/images:latest
